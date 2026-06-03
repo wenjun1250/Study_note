@@ -530,7 +530,10 @@ def generate_launch_description():
 #### 2.7.XML文件格式(适用于快速编写package.xml)
 
 ```xml
-<标签名>内容</标签名>
+<标签名>内容</标签名>      <!-- 内容赋值给标签 -->
+
+<标签名 属性名称="内容">   <!-- 内容赋值给标签里面的属性，可以同时赋值多个属性 --> 
+</标签名>     			  <!-- 必须加入结束标签符号 -->
 ```
 
 | 符号 | 名称          | 作用                 |
@@ -559,6 +562,21 @@ def generate_launch_description():
   | `<build_depend>` | 仅编译阶段需要的依赖（比如代码生成器、编译工具）             | `rosidl_default_generators`（msg/srv 编译）     |
   | `<exec_depend>`  | 仅运行阶段需要的依赖（比如运行时加载接口的库）               | `rosidl_default_runtime`（msg/srv 运行）        |
   | `<depend>`       | 同时包含「编译依赖 + 运行依赖」（ROS2 对旧版 ROS1 的兼容标签） | 同时需要编译 + 运行的核心库（如 rclpy、rclcpp） |
+
+- 嵌套结构
+
+  - ```xml
+    <link name="base_link">
+        <visual>
+            <geometry>
+                <!-- 只有加了这一句，它才是长方体 -->
+                <box size="1.0 1.0 0.2"/>
+            </geometry>
+        </visual>
+    </link>
+    ```
+
+    
 
 #### 2.8.CMakeList.txt文件格式
 
@@ -1594,6 +1612,8 @@ install(PROGRAMS                    # PROGRAMS表示安装 “可执行程序 / 
 
 #### 3.4.SLAM
 
+> 常用命令：`pkill -f ros` 删除所有ros进程
+
 ##### 3.4.1.wpr的slam启动文件集成
 
 > 核心： 跨功能包启动，启动 **`wpr`** 仿真包里面的 **`slam`** 导航(在仿真已经编译和加载环境成功的前提下)
@@ -1616,7 +1636,7 @@ install(PROGRAMS                    # PROGRAMS表示安装 “可执行程序 / 
   
       # gazebo_cmd启动 Gazebo 仿真环境
       gazebo_cmd = IncludeLaunchDescription(
-          # robocup_home.launch.py里面包含：Gazebo 场景，家具,墙壁,机器人,激光雷达,所有传感器配置
+          # robocup_home.launch.py里面包含：Gazebo 场景，家具,墙壁,机器人,激光雷达,里程计
           PythonLaunchDescriptionSource(
               os.path.join(launch_file_dir, 'robocup_home.launch.py')  
           )
@@ -1743,7 +1763,7 @@ install(PROGRAMS                    # PROGRAMS表示安装 “可执行程序 / 
         name='map_server',
         output='screen',			  # 将节点的标准输出（print/log）直接打印到终端
         parameters=[				  # 开始定义传递给节点的参数列表。
-            {'yaml_filename': /home/wenjun/maps_wpr_ws/map1.yaml},  # 加载地图，里面传入路径
+            {'yaml_filename': '/home/wenjun/maps_wpr_ws/map1.yaml'},  # 加载地图，里面传入路径
             {'use_sim_time': True}        # 仿真时间,告诉节点不使用系统真实时间，而是订阅 /clock 话题获取仿真时间。在 Gazebo/Webots 或带时钟源的环境中必须开启，否则时间戳不同步会导致 Rviz 不显示。
         ]
     )
@@ -1805,16 +1825,727 @@ install(PROGRAMS                    # PROGRAMS表示安装 “可执行程序 / 
 
   - ```bash
     # 杀死slam建图节点
-    ros2 node kill /slam_toolbox
+    pkill -f slam_toolbox
     
-    # 启动 map_server 加载地图
-    ros2 run nav2_map_server map_server --ros-args -p yaml_filename:="/home/wenjun/maps_wpr_ws/my_map.yaml" -p use_sim_time:=true
+    # 启动 map_server 加载地图，这里会进行等待激活我们的生命节点，需要依靠我们的生命周期管理器
+    ros2 run nav2_map_server map_server --ros-args \
+    -p yaml_filename:="/home/wenjun/maps_wpr_ws/map1.yaml" 
+    -p use_sim_time:=true
     
-    # 启动生命周期管理器激活地图
-    ros2 run nav2_lifecycle_manager lifecycle_manager --ros-args -p autostart:=true -p node_names:="[map_server]" -p use_sim_time:=true
+    # 单开一个终端，加载环境后启动生命周期管理器激活地图
+    ros2 run nav2_lifecycle_manager lifecycle_manager --ros-args \
+    -p autostart:=true \
+    -p node_names:="[map_server]" \
+    -p use_sim_time:=true
+    ```
+    
+    - **`nav2_map_server`** ： 		地图管理器
+    - **`nav2_lifecycle_manager`** ： **生命周期管理器，自动管理 Nav2 所有节点的启动、配置、激活、关闭**
+      - **`node_names`** ： 这里传入你需要管理的节点，这里是地图管理节点
+
+#### 3.5.NAV2实现路径规划(通过NAV2启动文件)
+
+##### 3.5.1.**首先加载栅格地图(上述有描述)**
+
+- ```bash
+  # 加载slam相关启动文件，通常包含slam建模和rviz和gazebo
+  ros2 launch wpr_user slam.launch.py
+  ```
+
+##### 3.5.2.**删除slam建图程序，方便导入现有的栅格图**
+
+- ```bash
+  pkill -f slam_toolbox
+  ```
+
+##### 3.5.3.**启动定位并且加载地图**
+
+- ```bash
+  ros2 launch nav2_bringup localization_launch.py \
+  map:=/home/wenjun/maps_wpr_ws/map1.yaml \
+  use_sim_time:=true
+  ```
+
+- **启动文件源码：**
+
+- ```python
+  #!/usr/bin/env python3
+  #
+  
+  import os
+  from ament_index_python.packages import get_package_share_directory
+  from launch import LaunchDescription
+  from launch.actions import IncludeLaunchDescription
+  from launch.launch_description_sources import PythonLaunchDescriptionSource
+  from launch.substitutions import LaunchConfiguration
+  from launch_ros.actions import Node
+  
+  def generate_launch_description():
+      # 实用仿真时间
+      use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+      
+      # 给定一个路径，用来查找仿真包的相关环境启动文件
+      launch_file_dir = os.path.join(get_package_share_directory('wpr_simulation2'), 'launch')
+  
+      # 启动一个家庭的仿真环境
+      home_cmd = IncludeLaunchDescription(
+          PythonLaunchDescriptionSource(
+              os.path.join(launch_file_dir, 'robocup_home.launch.py')
+          )
+      )
+  	# 行为树文件（用于导航逻辑）
+      behavior_tree = os.path.join(
+          get_package_share_directory('wpr_simulation2'),
+          'config',
+          'behavior_tree.xml'
+      )
+  	# 导入地图配置文件，如果自己有现成的配置文件，又不想动这个源代码，那么可以在命令里面加入参数
+      # 比如：map:=/home/wenjun/maps_wpr_ws/map1.yaml 
+      map_file = os.path.join(
+          get_package_share_directory('wpr_simulation2'),
+          'maps',
+          'map.yaml'
+      )
+      
+  	# 导入NAV2的全参数文件，通常会有默认参数
+      nav_param_file = os.path.join(
+          get_package_share_directory('wpr_simulation2'),
+          'config',
+          'nav2_params.yaml'
+      )
+  	# 核心：官方的启动目录
+      nav2_launch_dir = os.path.join(
+          get_package_share_directory('nav2_bringup'), 
+          'launch'
+      )
+  
+      # 核心：启动完整 Nav2 导航，主要是打开bringup_launch.py
+      navigation_cmd = IncludeLaunchDescription(
+          PythonLaunchDescriptionSource([nav2_launch_dir, '/bringup_launch.py']),
+          launch_arguments={
+              'map': map_file,
+              'use_sim_time': use_sim_time,
+              'params_file': nav_param_file}.items(),
+      )
+  	# 打开rviz的虚拟环境，用来演示导航效果
+      rviz_cmd = Node(
+              package='rviz2',
+              executable='rviz2',
+              name='rviz2',
+              arguments=['-d', [os.path.join(get_package_share_directory('wpr_simulation2'), 'rviz', 'navi.rviz')]]
+          )
+  
+      ld = LaunchDescription()
+  
+      # Add the commands to the launch description
+      ld.add_action(home_cmd)
+      ld.add_action(navigation_cmd)
+      ld.add_action(rviz_cmd)
+  
+      return ld
+  
+  ```
+
+- **启动文件里面调用的核心NAV2文件源码：`bringup_launch.py`** ，包含下面几个部分
+
+  - **`map_server`**（地图服务）
+  - **`AMCL`**（定位）
+  - **`controller`**（路径跟踪）
+  - **`planner`**（全局路径规划）
+  - **`recoveries`**（异常恢复）
+  - **`bt_navigator`**（行为树导航）
+  - **`lifecycle manager`**（生命周期管理）
+  -  **`tf`坐标转换**
+
+  
+
+##### 3.5.4.**再启动导航的路径规划器和控制器(必须加`map:=empty`，不抢地图)**
+
+- ```
+  ros2 launch nav2_bringup navigation_launch.py \
+  use_sim_time:=true \
+  map:=empty
+  ```
+
+- 
+
+##### 3.5.5.RViz 关键操作（补全 TF 链)
+
+- **点 2D Pose Estimate 按钮**：在 RViz 地图上，找到机器人真实位置，点一下并拖拽方向（和机器人朝向一致）
+  - 这一步是给 AMCL 初始位姿，AMCL 收到后会立刻发布`map→odom`的变换，TF 链直接补全
+
+- **点 2D Goal Pose 按钮**：在地图上点目标点，路径会正常规划，机器人自动沿路径行驶
+
+- <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260413171337491.png" alt="image-20260413171337491" style="zoom:50%;" />
+
+
+
+
+
+##### 3.5.6.rivz路径可视化
+
+- 在 `rivz` 实现可视化，添加路径读取path的话题内容： **`Add → Path → topic: /plan`**  
+  - <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260413112305022.png" alt="image-20260413112305022" style="zoom: 33%;" />
+
+  
+
+
+
+#### 3.6.NAV2路径规划相关功能层级结构分析
+
+**层级：**根基 → 基础 → 核心 → 调度 → 保障 → 管理
+
+##### 3.6.1.根基-`tf`坐标变换链
+
+- **变换链：**通过 `AMCL` 发布的 `map` 坐标系推断到 `base_link`，
+
+  - 通过验证不同坐标系之间的变换去判断哪个节点出现问题了
+
+  - ```
+    map（地图坐标系）
+      ←发布者：【AMCL发布】
+    odom（里程计坐标系）
+      ←发布者：【仿真/实机里程计发布（Gazebo/底盘驱动）】
+    base_footprint（机器人底盘）
+      ←发布者：【机器人模型发布】
+    base_link（机器人主体）
+      ↓ 【发布者：robot_state_publisher（URDF模型）】
+    雷达/摄像头等传感器
+    ```
+
+- 典型 `tf` 坐标链终端错误
+
+  - <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260413213016855.png" alt="image-20260413213016855" style="zoom:33%;" />
+
+  - 图片为tf坐标正常变换的效果，如果出现错误就是 `tf` 坐标转换链断了
+
+##### 3.6.2.基础-map server地图服务器和ACML算法
+
+1. map_server（地图服务器）
+
+- 作用：**加载离线地图**，发布 `/map` 话题
+- 依赖：只需要 TF 的 `map` 坐标系
+- 谁用它：AMCL、planner、bt_navigator
+- 注意：**全局只能有 1 个**，多开就冲突（**之前踩的坑**）
+
+2. AMCL（激光定位算法）
+
+- 作用：**机器人定位核心**，匹配雷达 + 地图，计算机器人在地图里的位置
+- 核心贡献：**发布 `map → odom` 变换**（补上 TF 最关键的一段）
+- 依赖：map_server 的地图、雷达数据、TF坐标变换链
+- **之前的警告：`Please set the initial pose` = 没给初始位置，无法定位**
+
+##### 3.6.3.核心-全局路径规划器和路径控制器
+
+1. planner（全局路径规划器）
+
+- 作用：**算大路线**（从起点到终点的整体路径，不考虑动态实时避障）
+- 依赖：map_server 地图、AMCL 定位、TF
+- 输出：一条全局的粗路径
+
+2. controller（局部控制器 / 路径跟踪）
+
+- 作用：**司机开车**，沿着全局路径走，**实时动态避障**，控制机器人轮子转速
+- 依赖：planner 的路径、雷达、TF、AMCL 定位
+- 输出：机器人运动指令 `/cmd_vel`
+
+##### 3.6.4.调度-bt_navigator（行为树导航）
+
+- 作用：**Nav2 的大脑**，统一调度 planner、controller、recoveries
+- 流程：
+  1. 收到目标点 → 调用 planner 算路线
+  2. 调用 controller 执行行走
+  3. 遇到障碍 → 调用 recoveries 恢复
+  4. 到达终点 → 停止
+- 所有导航指令（`RViz` 点 2D Goal）都是发给它
+  - <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260413213922561.png" alt="image-20260413213922561" style="zoom: 50%;" />
+
+##### 3.6.5.保障-recoveries（异常恢复）
+
+- 作用：机器人**卡住、迷路、撞墙**时，自动执行恢复动作
+- 例如：原地旋转、后退、重新规划路径
+- 调度：完全由 `bt_navigator` 控制
+
+##### 3.6.6.管理（统一启停）- **lifecycle manager（生命周期管理器）**
+
+- 作用：Nav2 所有节点都是**生命周期节点**（不能直接跑，需要激活）
+- 工作：**按顺序启动、配置、激活** map_server/AMCL/planner/controller
+- 核心：**防止组件乱启动、资源冲突**,   **一个管理器可以管理系统中所有的生命周期节点**
+- 之前的问题：混用官方管理器 + 自己写的管理器 → 节点打架
+
+
+
+
+
+#### 3.7.功能启动顺序(严格对照)
+
+> 官方启动文件也是按照这个顺序，必须先有**里程计** → 再启动**定位** → 最后启动**导航**
+
+1. **1.启动仿真**
+   发布机器人模型、里程计、雷达 → 生成 `odom`（里程计） → `base_footprint`（机器人地盘） TF
+
+2. **2.启动 map_server**
+   加载地图，发布 `/map` 话题，**注意：如果加载已经建好的地图无需再进行建模，那么要考虑地图被覆盖的风险，启动项不要再重复加载**
+
+3. **3.启动 AMCL + 生命周期管理器**
+   激活定位节点 → 等待初始位姿
+
+4. **4.RViz 给初始位姿**
+   AMCL 开始工作 → 发布 `map` → `odom` → TF 链**完整**
+
+5. **5.启动 planner + controller**
+   规划器、控制器就绪，依赖地图、定位、TF
+
+6. **6.RViz 点目标点**
+   `bt_navigator` 收到指令 → 调用 `planner` 算全局路径
+
+7. **7.机器人行走**
+   `controller` 跟踪路径 + 实时避障 → 发布运动指令
+
+8. **8.异常处理**
+   卡住 → `recoveries` 自动恢复
+
+9. **9.到达终点**
+   `bt_navigator` 结束任务
+
+
+
+
+
+#### 3.8.NAV2设置多个巡航点(插件专属`wpr_simulation2`仿真包)
+
+> 地图上面设置巡航点，方便快捷，无需手动定位坐标
+
+- 首先将路径规划相关的功能全部启动，具体顺序依据3.5
+
+##### 3.8.1. 安装插件并编译
+
+```bash
+cd ~/wpr_ws/src
+# 直接克隆过来
+git clone https://gitee.com/s-robot/wp_map_tools.git
+# 进入插件执行文件目录
+cd ~/wpr_ws/src/wp_map_tools/scripts/
+# 运行执行文件来安装插件
+./install_for_humble.sh`
+
+cd ~/wpr_ws/
+
+colcon build
+```
+
+##### 3.8.2.导入地图数据
+
+- 由于这个插件是 `wpr`仿真包专属插件，所以地图文件必须放入到 `wpr_simulation2` 的 `maps` 文件夹里面
+
+<img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260414215712247.png" alt="image-20260414215712247" style="zoom:50%;" />
+
+- 如果不想要从这里加载，可以从他的启动文件 **` ros2 launch wp_map_tools add_waypoint_sim.launch.py`**里面修改,地方如下图所示
+  - <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260414221509897.png" alt="image-20260414221509897" style="zoom:50%;" />
+
+##### 3.8.3.启动程序添加航点
+
+- 启动命令：
+
+  - ```bash
+    ros2 launch wp_map_tools add_waypoint_sim.launch.py
+    ```
+
+- 进入 `rviz` 来选择多个航点
+- <img src="C:\Users\23629\AppData\Roaming\Typora\typora-user-images\image-20260414220324667.png" alt="image-20260414220324667" style="zoom:67%;" />
+
+- 最后依靠以下命令生成配置文件  **`waypoints.yaml`** 
+
+  - ```bash
+    ros2 run wp_map_tools wp_saver
+    ```
+
+  - 会生成到用户的主文件夹里面
+
+
+
+##### 3.8.4.写节点依靠配置文件实现循环导航
+
+- **配置文件( `waypoints.yaml`)：**
+
+  - ```yaml
+    Waypoints_Num: 3
+    Waypoint_1:
+      Type: Waypoint
+      Name: 1
+      Pos_x: -2.5771
+      Pos_y: 2.26442
+      Pos_z: 0
+      Ori_x: 0
+      Ori_y: 0
+      Ori_z: 0
+      Ori_w: 1
+    Waypoint_2:
+      Type: Waypoint
+      Name: 2
+      Pos_x: 2.38092
+      Pos_y: -1.81623
+      Pos_z: 0
+      Ori_x: 0
+      Ori_y: 0
+      Ori_z: 0
+      Ori_w: 1
+    Waypoint_3:
+      Type: Waypoint
+      Name: 3
+      Pos_x: -0.0376959
+      Pos_y: -2.55577
+      Pos_z: 0
+      Ori_x: 0
+      Ori_y: 0
+      Ori_z: 0
+      Ori_w: 1
     ```
 
     
+
+- **节点代码：**
+
+  - ```python
+    #!/usr/bin/env python3
+    import os
+    import yaml
+    import rclpy
+    from ament_index_python.packages import get_package_share_directory
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from nav2_msgs.action import NavigateToPose   # Nav2 官方单点导航动作
+    #  ROS 2 的基础功能包,用于描述物体在空间中的位置、姿态、速度等几何信息, 包含：x, y, z 坐标 + 四元数朝向
+    from geometry_msgs.msg import PoseStamped  
+    
+    class MultiPointCruise(Node):
+        def __init__(self):
+            super().__init__('multi_point_cruise_node')
+            self.get_logger().info("✅ 多航点循环巡航节点启动（稳定版）")
+    
+            #  连接 Nav2 导航服务，单点导航       客户端 vs 服务端
+            # NavigateToPose：动作类型（单点导航）  /navigate_to_pose：动作名称（Nav2 提供的服务端） 
+            # action_client ： 客户端
+            self.action_client ： 客户端 = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+            while not self.action_client.wait_for_server(timeout_sec=1.0):
+                self.get_logger().info("等待 Nav2 导航服务...")
+    
+            # 读取 waypoints.yaml 加载航点
+            pkg_share_dir = get_package_share_directory('wpr_user')  # 读取文件路径
+            self.waypoint_file = os.path.join(pkg_share_dir, 'config', 'waypoints.yaml') # 完整拼接路径
+            self.waypoints = self.load_waypoints()
+            self.current_idx = 0
+            self._destroyed = False
+    
+        # 加载航电函数，用来读取 yaml 并返回航点列表
+        def load_waypoints(self):
+            # 文件内容转成字典
+            with open(self.waypoint_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            waypoint_num = data['Waypoints_Num']
+            waypoints = []
+            for i in range(1, waypoint_num + 1):
+                # 依次读取：Waypoint_1、Waypoint_2、Waypoint_3
+                wp = data[f'Waypoint_{i}']
+                # 创建一个导航目标点消息
+                pose = PoseStamped()
+                # 坐标系：map 地图坐标系
+                pose.header.frame_id = "map"
+                # 时间戳
+                pose.header.stamp = self.get_clock().now().to_msg()
+                # 赋值 x y 坐标 ，z 固定为 0（平面导航）
+                pose.pose.position.x = float(wp['Pos_x'])
+                pose.pose.position.y = float(wp['Pos_y'])
+                pose.pose.position.z = 0.0
+                # 朝向角度：四元数
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = float(wp['Ori_z'])
+                pose.pose.orientation.w = float(wp['Ori_w'])
+                # 将点写入列表
+                waypoints.append(pose)
+                self.get_logger().info(f"✅ 加载航点 {i}")
+            return waypoints
+    
+        def goto_next(self):
+            if self._destroyed or not self.waypoints:
+                return
+    
+            idx = self.current_idx
+            pose = self.waypoints[idx]
+            self.get_logger().info(f"🚗 前往航点 {idx+1}")
+    
+            # 创建导航动作目标
+            goal = NavigateToPose.Goal()
+            # 实例化导航动作，将pose赋值进去
+            goal.pose = pose
+    
+            # 异步发送导航目标
+            self.future = self.action_client.send_goal_async(goal)
+            
+            # 注册回调函数，发送完成 → 自动调用 on_goal_response
+            self.future.add_done_callback(self.on_goal_response)
+    
+        def on_goal_response(self, future):
+            # 得到发送导航目标的回复，会返回 accepted = True 和 accepted = False 
+            goal_handle = future.result()
+            # 如果返回不接受说明还没有到达导航点，直接拒绝
+            if not goal_handle.accepted:
+                self.get_logger().error("任务被拒绝")
+                return
+            # 异步等待机器人的动作句柄(goal_handle)返回数值，不会卡死程序
+            self.result_future = goal_handle.get_result_async()
+            self.result_future.add_done_callback(self.on_result)
+    
+        def on_result(self, future):
+            if self._destroyed:
+                return
+            # 到达！自动下一个
+            self.get_logger().info(f"✅ 已到达航点 {self.current_idx+1}")
+            # 准备下一个航点，序号往后面推
+            self.current_idx = (self.current_idx + 1) % len(self.waypoints)
+            self.goto_next()
+    
+        def destroy_node(self):
+            self._destroyed = True
+            super().destroy_node()
+    
+    def main(args=None):
+        rclpy.init(args=args)
+        node = MultiPointCruise()
+        try:
+            node.goto_next()
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            node.get_logger().info("🛑 安全退出")
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+    
+    if __name__ == '__main__':
+        main()
+    ```
+
+    
+
+
+
+### 4.建模与仿真
+
+#### 4.1.机器人建模(URDF)
+
+> URDF (**Unified Robot Description Format**) —————— **统一机器人描述格式**
+
+- URDF是机器人操作系统（ROS）中用于描述机器人结构、外观和物理属性的标准文件格式，基于 `xml` 文件格式，后缀为 `.urdf`，通常在 **`Gazebo`** 或者 **`Rviz`** 中将 URDF 文件解析为图形化的机器人模型。
+
+  - 如果非仿真环境，那么使用 URDF 结合 Rviz 直接显示感知的真实环境信息
+
+  -  如果是仿真环境，那么需要使用 URDF 结合 **`Gazebo`** 搭建仿真环境，并结合 **`Rviz`**  显示感知的虚拟环境信息
+
+- URDF 标签分类：
+
+  - link 连杆标签 
+  - joint 关节标签 
+  - gazebo 集成gazebo需要使用的标签 
+  - robot 根标签，类似于 launch文件中的launch标签
+
+- 非常严格的层级结构：`robot` 为最高层级，`link` 和 `joint` 以及 `gazebo` 为同一层级，挂载在 `robot` 的下一个层级
+
+  - ```xml
+    <!-- 第 0 层：只有这一层是顶层 -->
+    <robot name="我的机器人">
+    
+        <!-- 第 1 层：必须直接挂在 robot 下面 -->
+        <link name="连杆A">
+            <!-- 第 2 层：link 的子标签，不能直接写在 robot 下 -->
+            <visual>
+                <geometry>
+                    <box size="1 1 1"/>
+                </geometry>
+            </visual>
+        </link>
+    
+        <!-- 第 1 层：也是直接挂在 robot 下面 -->
+        <joint name="关节1" type="fixed">
+            <parent link="连杆A"/>
+            <child link="连杆B"/>
+        </joint>
+    
+        <!-- 第 1 层：gazebo 标签也挂在 robot 下 -->
+        <gazebo reference="连杆A">
+            <material>Gazebo/Blue</material>
+        </gazebo>
+    
+    </robot
+    ```
+
+    
+
+##### 4.1.1. URDF -- ` <link/>`
+
+- 用于描述机器人某个部件(也即刚体部分)的外观和物理属性，比如: 机器人底座、轮子、激光雷达、摄像头...每一个部件都对应一个 link, 在 link 标签内，可以设计该部件的形状、尺寸、颜色、惯性矩阵、碰撞参数等一系列属性
+
+- **主要的属性子标签(层级仅次于 `link`)**
+
+  - `<visual>` (视觉属性)
+
+    `<collision> `(碰撞属性)
+
+    `<inertial> `(惯性属性)
+
+- **中间层级的标签**：
+
+  -  `<geometry>` ：用来联接几何形状标签
+  - `<origin>` ： 用来设置坐标系与杆件几何中心的偏移量与倾斜弧度
+    -  属性1: `xyz`=x偏移 y偏移 z偏移 
+    - 属性2: `rpy`=x翻滚 y俯仰 z偏航 (单位是弧度)
+
+  - `<material>` ：专门负责**外观颜色或纹理**，它只能存在于 `<visual>` 标签内部
+
+- **底层标签**——**几何形状子标签**(必须在属性标签的下面通过挂载 `<geometry>` 标签来联通几何形状的标签)
+
+  - `<box>` (长方体):
+    - `size="长 宽 高"`：定义长方体的尺寸。
+  - `<cylinder>` (圆柱体):
+    - `radius="半径"`：定义圆柱体的半径。
+    - `length="长度"`：定义圆柱体的高度。
+  - `<sphere>` (球体):
+    - `radius="半径"`：定义球体的半径。
+  - `<mesh>` (网格):
+    - `filename="文件路径"`：引用一个外部的 3D 模型文件（如 `.stl` 或 `.dae`），用于创建复杂、不规则的形状。
+
+  - 举例：
+
+  - ```xml
+    <link name="my_link">
+        <visual>
+            <geometry>
+                <cylinder radius="1" length="0.5"/> <!-- 形状在这里 -->
+            </geometry>
+        </visual>
+    </link>
+    ```
+
+    
+
+- **完整层级结构图：**
+
+- ```
+  <link name="示例连杆">
+  │
+  ├── 🟢 <visual> (视觉属性 - 第一层级)
+  │   │
+  │   ├── 🔵 <origin> (中间层级 - 位置/姿态)
+  │   │   └── 属性: xyz (坐标), rpy (欧拉角)
+  │   │
+  │   ├── 🔵 <geometry> (中间层级 - 几何容器)
+  │   │   │
+  │   │   └── 🟠 几何形状 (底层标签 - 三选一)
+  │   │       ├── <box size="x y z"/>
+  │   │       ├── <cylinder radius="r" length="l"/>
+  │   │       ├── <sphere radius="r"/>
+  │   │       └── <mesh filename="路径"/>
+  │   │
+  │   └── 🔵 <material> (中间层级 - 材质/颜色)
+  │       └── <color rgba="r g b a"/>
+  │
+  ├── 🟡 <collision> (碰撞属性 - 第一层级)
+  │   │
+  │   ├── 🔵 <origin> (中间层级 - 位置/姿态)
+  │   │
+  │   └── 🔵 <geometry> (中间层级 - 几何容器)
+  │       └── 🟠 (同上，定义碰撞的具体形状)
+  │
+  └── 🔴 <inertial> (惯性属性 - 第一层级)
+      │
+      ├── 🔵 <origin> (中间层级 - 定义质心位置)
+      │
+      ├── <mass value="质量"/>
+      │
+      └── <inertia .../> (惯性矩阵)
+  ```
+
+  
+
+##### **4.1.2. URDF --** `<joint/>`
+
+- **用于描述机器人两个部件（Link）之间的连接关系**。
+  - 它定义了两个连杆之间是如何相对运动的（例如：是固定死的、旋转的、还是滑动的）。
+  - 每一个 `<joint>` 必须包含两个核心引用：**parent（父连杆）** 和 **child（子连杆）**。
+- **主要的属性子标签（层级仅次于 joint）**
+  - `<parent>`：定义父级连杆（参考系）。
+  - `<child>`：定义子级连杆（被移动的部件）。
+  - `<calibration>`：（可选）关节的参考位置校准。
+  - `<limit>`：（重要）定义运动的物理限制（如角度范围、速度、力矩）。
+  - `<dynamics>`：（可选）定义物理属性，如摩擦和阻尼。
+  - `<safety_controller>`：（可选）安全控制器设置。
+  - `<mimic>`：（可选）模仿其他关节的运动。
+
+- **中间层级的标签**：
+  -  `<geometry>` ：用来联接几何形状标签
+  - `<axis>`：专门负责定义**运动轴向**（仅在非固定关节中有效）。
+    - 属性：`xyz` = "x y z"：定义关节旋转或移动的轴向量（通常是 `1 0 0` 代表绕X轴，`0 0 1` 代表绕Z轴）
+
+- **底层标签**——关节类型（通过 type 属性定义，必须在 joint 标签的开始处定义）：
+  - `<joint ... type="类型">`
+  - `revolute` (旋转关节)：
+    - 描述：绕轴旋转，有角度限制（由 `<limit>` 定义）。
+    - 示例：`<joint name="joint1" type="revolute">`
+  - `continuous` (连续旋转关节)：
+    - 描述：绕轴无限旋转（如轮子），忽略 `<limit>` 中的角度限制。
+    - 示例：`<joint name="wheel_joint" type="continuous">`
+  - `prismatic` (滑动关节)：
+    - 描述：沿轴滑动，有距离限制。
+    - 示例：`<joint name="piston" type="prismatic">`
+  - `fixed` (固定关节)：
+    - 描述：不可运动，将两个连杆刚性连接。
+    - 示例：`<joint name="base_link" type="fixed">`
+  - `floating` (浮动关节)：
+    - 描述：允许在6个自由度上自由运动（x, y, z 移动 + 绕轴旋转）。
+  - `planar` (平面关节)：
+    - 描述：在垂直于轴的平面上移动，并绕轴旋转。
+
+
+
+- 完整层级结构图：
+
+- ```
+  <joint name="示例关节" type="类型(revolute/fixed/...)">
+  │
+  ├── 🟢 <parent> (主要属性 - 父连杆)
+  │   └── 属性: link="父连杆名称"
+  │
+  ├── 🟡 <child> (主要属性 - 子连杆)
+  │   └── 属性: link="子连杆名称"
+  │
+  ├── 🔵 <origin> (中间层级 - 位置/姿态)
+  │   └── 属性: xyz="x y z", rpy="r p y"
+  │       (定义关节轴心相对于父连杆的位置)
+  │
+  ├── 🔵 <axis> (中间层级 - 运动轴向)
+  │   └── 属性: xyz="1 0 0"
+  │       (定义关节是绕哪个轴转动或移动，默认是X轴)
+  │
+  ├── 🔴 <limit> (主要属性 - 运动限制)
+  │   ├── 属性: lower="下限" (弧度或米)
+  │   ├── 属性: upper="上限" (弧度或米)
+  │   ├── 属性: effort="最大力/力矩"
+  │   └── 属性: velocity="最大速度"
+  │
+  └── 🟣 <dynamics> (主要属性 - 物理特性)
+      ├── 属性: damping="阻尼系数"
+      └── 属性: friction="摩擦系数"
+  ```
+
+  
+
+
+
+
+
+
+
+
 
 
 
